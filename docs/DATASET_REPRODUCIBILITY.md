@@ -1,0 +1,126 @@
+# AquaGuard AI — Dataset Generation and Reproducibility
+
+This document concerns the **synthetic v4 water-network datasets** used in the
+AquaGuard AI ICSIC 2026 proof-of-concept study. The published numbers are
+simulation metrics, **not** validated utility-field performance.
+
+## Reproduce the exact dataset
+
+Use Python 3.13 and install the tested dependencies:
+
+```bash
+python -m pip install -r requirements-dataset.txt
+python aquaguard_v4_synth.py --out ./generated_data --verify
+```
+
+Successful verification prints **`MATCH repo file`** twice and exits successfully.
+The command regenerates the following CSVs; it does not retrain ML models:
+
+| CSV | Records | Columns | SHA-256 | Git blob SHA-1 |
+|---|---:|---:|---|---|
+| `jordan_v4_train.csv` | 150,005 | 44 | `7eebeef1c1aab45953a771812a29642d054b9c89630d9e6b0f8c99615cce6307` | `12bd5608fc7160af85cd274a042329f68a1dbe93` |
+| `jordan_v4_test.csv` | 30,020 | 44 | `550322a1011670f3b56bb88ca94b2488b8c4df495ea60a3e38e60d765e2ff500` | `5570471fcc56d5a6e54fc4822b619155925a9cbb` |
+
+`--verify` compares local SHA-256 hashes to the listed references. Both
+**Git blob SHA-1 hashes were additionally checked against the files in the
+existing AquaGuard-Model GitHub repository** on 2026-10-24. The hashes match
+byte-for-byte. A separate reproduction succeeded using Python 3.13.5,
+NumPy 2.3.5, and pandas 2.2.3. The original runtime's library versions were
+not recorded; byte identity is empirically established, not guaranteed across
+all future software versions.
+
+For a fingerprint report on an existing CSV:
+
+```bash
+python dataset_fingerprint.py ./generated_data/jordan_v4_train.csv
+python dataset_fingerprint.py ./generated_data/jordan_v4_test.csv
+```
+
+The canonical **portable generator** is `aquaguard_v4_synth.py`. The recovered
+historical generator with its original pressure-clamp edits is archived at
+`provenance/generate_v4_dataset_patched.py`. That archival file writes to
+`/home/claude`, so it is not the recommended entry point. The portable script
+keeps the network, physics engine, demand model, anomaly model, and row
+construction logic equivalent, replacing only the run/verification wrapper.
+
+## Generator parameters
+
+- 12 **illustrative** Jordanian governorate configurations, 31 branch chains,
+  95 segments; one reading per segment and timestamp (3–4 per branch).
+- Development: 1,579 14-minute timestamps, from **2019-01-01 00:00** to
+  **2019-01-16 08:12**. `numpy.random.default_rng(2024)`.
+- Test: 316 14-minute timestamps, from **2022-07-01 00:00** to
+  **2022-07-04 01:30**. `numpy.random.default_rng(2025)`.
+- Fault injection: 20% probability per **(timestamp, branch)** for the
+  development run; 5% for test, with at most one fault-bearing segment per
+  branch/timestamp. Conditional type probabilities: leak 0.45, burst 0.25,
+  theft 0.30. Therefore **row-level** anomaly prevalence is 6.50% in
+  development and 1.63% in test; the 20%/5% are not row-class percentages.
+- Inlet/outlet flow propagates along each branch with
+  `Flow_In(segment k+1) = Flow_Out(segment k)`.
+- Fault signatures are explicitly injected. Simulated leak severity is 4–18%
+  inlet flow, burst 25–72%, theft 5–14%, with distinct pressure multipliers.
+
+## Pressure calculation: implemented physics, not field calibration
+
+The generator uses the **Darcy–Weisbach head-loss equation** with the
+**Churchill (1977) friction factor** for its predicted pressure drop:
+
+```text
+Q [m³/s] = max(flow_lpm, 0.1) / 60000
+D = 0.05 m (constant)
+A = pi * (D / 2)^2
+v = Q / A                         [m/s]
+nu = 1.004e-6 m²/s
+Re = max(v * D / nu, 1)
+relative roughness = 0.00026 / D
+f = Churchill(1977, Re, relative_roughness)
+head loss = f * (pipe_length / D) * v² / (2 * 9.81)  [m]
+DP_Predicted = clip(1.422 * head_loss, 0.01, 60)    [PSI]
+```
+
+- `Flow_In`, `Flow_Out`: L/min; pressures and pressure residuals: PSI; pipe
+  lengths: metres.
+- Diameter and roughness are **fixed for every segment**. There is no
+  variable-diameter network model or external hydraulic calibration.
+- `HW_Coefficient` is saved to CSV but **does not enter the pressure equation**,
+  despite its name and variation among segments.
+- `DP_Predicted` is derived from the simulator's own hydraulic function and
+  then used to create simulated `Pressure_Out`; its residual is therefore **not
+  an independent physical check** on the simulator.
+- `Velocity_Proxy` is a custom feature, not a measured speed in m/s.
+
+## Important limitations and fidelity checks
+
+| Audit finding | Development | Test |
+|---|---:|---:|
+| `DP_Predicted` at 60-PSI ceiling | 14,663 / 150,005 = **9.78%** | 6,827 / 30,020 = **22.74%** |
+| `Pressure_Out` at 0.5-PSI floor | 26,437 / 150,005 = **17.62%** | 9,034 / 30,020 = **30.09%** |
+| Anomalous records | 9,752 (6.50%) | 488 (1.63%) |
+
+These clamps can distort physically plausible pressure relationships. In
+addition, development and test data are generated by the **same simulator**;
+they cover **short, distinct calendar windows**, not multi-year field
+telemetry or all seasons. Ramadan is not represented in either span; the Eid
+flag is a stochastic input rather than a checked real-calendar date. Some
+geographic fields (including the governorate NRW rate, elevation and
+population density) are context columns, **not causal inputs to flow/pressure
+generation**. These facts limit generalization to real utility networks.
+
+No real water-network measurements, actual utility topology, prototype
+measurements or verified field fault labels were used. A high classification
+score may partly reflect the hand-designed signature rules. Independent
+validation with real-world telemetry remains a necessary future step.
+
+## Reproducibility scope
+
+**Verified:** generated CSV structure, contents and hash identity with the
+repository's existing CSVs; dates, class counts, branch network, clipping
+rates, and generator implementation.
+
+**Not verified here:** full re-training and scoring of `aquaguard_v4_2_model.py`
+from scratch, calibration reliability, accuracy on real field data, or the
+physical accuracy of the simplified synthetic network. The original script
+and an explanation of its edits were recovered from earlier project work;
+this package does not assert that the original operating-system environment
+was recovered.
